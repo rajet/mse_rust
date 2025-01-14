@@ -1,43 +1,105 @@
 use crate::term::*;
 use std::collections::HashSet;
+use std::collections::HashMap;
 
-/// Evaluates a term:
-/// In order to simplify the term as much as possible, we use a call-by-value strategy.
-/// We even evaluate the body of an abstraction eagerly.
-/// 
-/// The evaluation rules are as follows:
-/// - A variable evaluates to itself.
-/// - An abstraction evaluates to itself, even the body is eagerly evaluated.
-/// - An application evaluates the left side, then the right side, 
-///   and applies the left side to the right side by substitution.
-///   Examples: 
-///   `x` evaluates to `x`.
-///   `λx. x` evaluates to `λx. x`.
-///   `(λx. x) y` evaluates to `y`. 
-///   `(λx. (λy. x)) z` evaluates to `λy. z`.
-///   `(λx. (λy. x)) a b` evaluates to `a`.
-pub fn eval(term: &Term) -> Term {    
-    match term{
-        Term::Var(s)=>
-            var(s),
-        Term::Abs(s, t) =>
-            abs(s, (**t).clone()),
+/// Creates a new empty environment.
+pub fn empty_env() -> Env {
+    HashMap::new()
+}
+
+// Evaluates a term:
+// env is a list of variable bindings
+pub fn eval(env: &Env, term: &Term) -> Result<Term, String> {
+    match term {
         Term::App(t1, t2) => {
-            // app(eval(t1), eval(t2))
+            let l = eval(env, t1)?;
+            let r = eval(env, t2)?;
+            // If left is an abstraction, substitute the parameter with right
+            if let Term::Abs(param, body) = l {
+                // Remove the parameter from the environment
+                // The parameter shadows any outer bindings
+                let mut env = env.clone();
+                env.remove(&param);
 
-            let left_term = eval(t1);
-            let right_term = eval(t2);
+                eval(&env, &substitute(&body, &param, &r))
+            } else {
+                Ok(app(l, r))
+            }
+        }
 
-            match left_term {
-                Term::Var(_) => left_term.clone(),
-                Term::Abs(param, body) => eval(&substitute(&body, &param, &right_term)), // substitute t2 into t1
-                Term::App(_, _) => eval(&left_term), // recursion on left term
+        // eagerly evaluate the body of an abstraction
+        Term::Abs(param, body) => Ok(abs(param, eval(env, body)?)), 
+
+        Term::Var(x) => {
+            // Look up the variable in the environment
+            if let Some(t) = env.get(x) {
+                Ok(t.clone())
+            } else {
+                Ok(var(x))
+            }
+        },
+
+
+        Term::Int(n) => Ok(i(*n)),
+
+        Term::Bool(v) => Ok(b(*v)),
+
+        Term::If(cond, t1, t2) => {
+            let c = eval(env, cond)?;
+            if let Term::Bool(b) = c {
+                if b {
+                    return eval(env, t1);
+                } else {
+                    return eval(env, t2);
+                }
+            } else {
+                Ok(ifte(c, *t1.clone(), *t2.clone()))
+            }
+        }
+
+        Term::PrimOp(op, t1, t2) => {
+            let l = eval(env, t1)?;
+            let r = eval(env, t2)?;
+            match op {
+                PrimOp::Add | PrimOp::Sub | PrimOp::Mul | PrimOp::Div  => {
+                    if let (Term::Int(n1), Term::Int(n2)) = (&l, &r) {
+                        Ok(i(match op {
+                            PrimOp::Add => n1 + n2,
+                            PrimOp::Sub => n1 - n2,
+                            PrimOp::Mul => n1 * n2,
+                            PrimOp::Div => n1 / n2, // TODO: handle division by zero and add a test
+                            _ => unreachable!()
+                        }))
+                    } else {
+                        Ok(primop(*op, l, r))
+                    }
+                }
+
+                PrimOp::Lt | PrimOp::Gt => {
+                    if let (Term::Int(n1), Term::Int(n2)) = (&l, &r) {
+                        Ok(b(match op {
+                            PrimOp::Lt => n1 < n2,
+                            PrimOp::Gt => n1 > n2,
+                            _ => unreachable!()
+                        }))
+                    } else {
+                        Ok(primop(*op, l, r))
+                    }
+                }
+               
+                PrimOp::Eq => {
+                    if let (Term::Int(n1), Term::Int(n2)) = (&l, &r) {
+                        Ok(b(n1 == n2))
+                    } else if let (Term::Bool(b1), Term::Bool(b2)) = (&l, &r) {
+                        Ok(b(b1 == b2))
+                    } else {
+                        Ok(primop(*op, l, r))
+                    }
+                }
             }
         }
     }
 }
-
-// term: (λx.x) y = y
 
 
 /// Replace all occurrences of a variable `var` in a `term` with `replacement`.
@@ -56,11 +118,24 @@ pub fn substitute(term: &Term, var: &str, replacement: &Term) -> Term {
                 abs(param, substitute(body, var, replacement))
             }
         }
+        Term::Abs(param, body) => Term::Abs(param.clone(), body.clone()), // redeclaration of the same variable
+
         Term::App(t1, t2) => Term::App(
             Box::new(substitute(t1, var, replacement)),
             Box::new(substitute(t2, var, replacement)),
         ),
-        _ => term.clone(),
+        Term::Int(n) => Term::Int(*n),
+        Term::Bool(b) => Term::Bool(*b),
+        Term::If(cond, t1, t2) => Term::If(
+            Box::new(substitute(cond, var, replacement)),
+            Box::new(substitute(t1, var, replacement)),
+            Box::new(substitute(t2, var, replacement)),
+        ),
+        Term::PrimOp(op, t1, t2) => Term::PrimOp(
+            *op,
+            Box::new(substitute(t1, var, replacement)),
+            Box::new(substitute(t2, var, replacement)),
+        )
     }
 }
 
@@ -82,6 +157,19 @@ pub fn free_variables(term: &Term) -> HashSet<String> {
             set.extend(free_variables(t2));
             set
         }
+        Term::Int(_) | Term::Bool(_) => HashSet::new(),
+        Term::If(cond, t1, t2) => {
+            let mut set = free_variables(cond);
+            set.extend(free_variables(t1));
+            set.extend(free_variables(t2));
+            set
+        },
+        Term::PrimOp(_, t1, t2) => {
+            let mut set = free_variables(t1);
+            set.extend(free_variables(t2));
+            set
+        }
+
     }
 }
 
@@ -115,6 +203,18 @@ fn collect_all_vars(term: &Term) -> HashSet<String> {
             vars
         }
         Term::App(t1, t2) => {
+            let mut vars = collect_all_vars(t1);
+            vars.extend(collect_all_vars(t2));
+            vars
+        }
+        Term::Int(_) | Term::Bool(_) => HashSet::new(),
+        Term::If(cond, t1, t2) => {
+            let mut vars = collect_all_vars(cond);
+            vars.extend(collect_all_vars(t1));
+            vars.extend(collect_all_vars(t2));
+            vars
+        }
+        Term::PrimOp(_, t1, t2) => {
             let mut vars = collect_all_vars(t1);
             vars.extend(collect_all_vars(t2));
             vars
@@ -156,7 +256,7 @@ mod tests {
     fn test_eval_simple_application() {
         // (λx. x) y -> y
         let term = app(abs("x", var("x")), var("y"));
-        let evaluated = eval(&term);
+        let evaluated = eval(&empty_env(), &term).unwrap();
         let expected = var("y");
         assert_eq!(evaluated, expected);
     }
@@ -165,7 +265,7 @@ mod tests {
     fn test_eval_nested_abstraction() {
         // (λx. λy. x) z -> λy. z
         let term = app(abs("x", abs("y", var("x"))), var("z"));
-        let evaluated = eval(&term);
+        let evaluated = eval(&empty_env(), &term).unwrap();
         let expected = abs("y", var("z"));
         assert_eq!(evaluated, expected);
     }
@@ -190,7 +290,7 @@ mod tests {
     #[test]
     fn test_eval_complex_application() {
         let term = app(abs("x", app(abs("y", var("y")), var("x"))), var("z"));
-        let evaluated = eval(&term);
+        let evaluated = eval(&empty_env(), &term).unwrap();
         let expected = var("z");
         assert_eq!(evaluated, expected);
     }

@@ -1,6 +1,6 @@
 DON'T EDIT THIS FILE!
 
-quiz2
+errors6
 
 intro1
 intro2
@@ -45,3 +45,9 @@ strings4
 hashmaps1
 hashmaps2
 hashmaps3
+quiz2
+errors1
+errors2
+errors3
+errors4
+errors5
